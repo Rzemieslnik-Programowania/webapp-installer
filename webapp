@@ -1,0 +1,183 @@
+#!/bin/bash
+# webapp - menedżer PWA dla Pop!_OS / GNOME
+# Użycie:
+#   webapp add "Nazwa" "https://url.com" ["https://icon-url.com/icon.png"]
+#   webapp remove "Nazwa"
+#   webapp list
+#   webapp icons [nazwa]
+#
+# Ikony wysokiej jakości: https://dashboardicons.com
+# CDN: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{nazwa}.png
+
+APPS_DIR="$HOME/.local/share/applications"
+ICONS_DIR="$HOME/.local/share/applications/icons"
+
+mkdir -p "$APPS_DIR" "$ICONS_DIR"
+
+slugify() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-'
+}
+
+# Wykryj sposób instalacji Chromium
+detect_chromium() {
+    if command -v chromium &>/dev/null; then
+        echo "chromium"
+    elif command -v chromium-browser &>/dev/null; then
+        echo "chromium-browser"
+    elif flatpak list 2>/dev/null | grep -q "org.chromium.Chromium"; then
+        echo "flatpak run org.chromium.Chromium"
+    else
+        echo ""
+    fi
+}
+
+# Próbuj pobrać ikonę z URL; zwraca 0 przy sukcesie
+fetch_icon() {
+    local url="$1"
+    local dest="$2"
+
+    if [ -z "$url" ]; then
+        return 1
+    fi
+
+    echo "  ↓ Pobieram ikonę z: $url"
+    local http_code
+    http_code=$(curl -sL --max-time 10 -o "$dest" -w "%{http_code}" "$url")
+
+    if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ] && [ -s "$dest" ]; then
+        return 0
+    else
+        rm -f "$dest"
+        return 1
+    fi
+}
+
+cmd="$1"
+shift
+
+case "$cmd" in
+    add)
+        NAME="$1"
+        URL="$2"
+        ICON_URL="${3:-}"
+        SLUG=$(slugify "$NAME")
+        DESKTOP_FILE="$APPS_DIR/webapp-${SLUG}.desktop"
+        ICON_DEST="$ICONS_DIR/${SLUG}.png"
+
+        if [ -z "$NAME" ] || [ -z "$URL" ]; then
+            echo "Użycie: webapp add \"Nazwa\" \"https://url.com\" [\"https://icon-url.png\"]"
+            echo ""
+            echo "Ikony wysokiej jakości → https://dashboardicons.com"
+            echo "CDN:  https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{nazwa}.png"
+            echo "Przykład:"
+            echo "  webapp add \"Linear\" \"https://linear.app\" \\"
+            echo "    \"https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/linear.png\""
+            exit 1
+        fi
+
+        # Wykryj Chromium
+        CHROMIUM_CMD=$(detect_chromium)
+        if [ -z "$CHROMIUM_CMD" ]; then
+            echo "✗ Nie znaleziono Chromium. Zainstaluj:"
+            echo "   sudo apt install chromium-browser"
+            echo "   lub: flatpak install flathub org.chromium.Chromium"
+            exit 1
+        fi
+        echo "  ✓ Chromium: $CHROMIUM_CMD"
+
+        ICON="web-browser"  # fallback: ikona systemowa
+
+        if [ -n "$ICON_URL" ]; then
+            # 1. Podany URL ikony (Dashboard Icons lub inny)
+            if fetch_icon "$ICON_URL" "$ICON_DEST"; then
+                ICON="$ICON_DEST"
+                echo "  ✓ Ikona pobrana z podanego URL"
+            else
+                echo "  ✗ Nie udało się pobrać ikony z URL, próbuję favicon..."
+            fi
+        fi
+
+        # 2. Fallback: favicon strony
+        if [ "$ICON" = "web-browser" ]; then
+            DOMAIN=$(echo "$URL" | sed 's|https\?://||' | cut -d'/' -f1)
+            FAVICON_URL="https://www.google.com/s2/favicons?domain=${DOMAIN}&sz=128"
+            if fetch_icon "$FAVICON_URL" "$ICON_DEST"; then
+                ICON="$ICON_DEST"
+                echo "  ✓ Ikona pobrana z favicon"
+            else
+                echo "  ✗ Favicon niedostępny, używam ikony domyślnej"
+                echo "     Spróbuj podać URL ręcznie: https://dashboardicons.com"
+            fi
+        fi
+
+        cat > "$DESKTOP_FILE" <<DESKTOP
+[Desktop Entry]
+Version=1.0
+Name=$NAME
+Comment=$NAME
+Exec=$CHROMIUM_CMD --app=$URL
+Icon=$ICON
+Type=Application
+Categories=Network;WebApplication;
+StartupWMClass=webapp-${SLUG}
+StartupNotify=true
+DESKTOP
+
+        update-desktop-database "$APPS_DIR" 2>/dev/null
+        echo "✓ Dodano: $NAME → $URL"
+        ;;
+
+    remove)
+        NAME="$1"
+        SLUG=$(slugify "$NAME")
+        DESKTOP_FILE="$APPS_DIR/webapp-${SLUG}.desktop"
+
+        if [ -z "$NAME" ]; then
+            echo "Użycie: webapp remove \"Nazwa\""
+            exit 1
+        fi
+
+        if [ ! -f "$DESKTOP_FILE" ]; then
+            echo "✗ Nie znaleziono web app: \"$NAME\""
+            exit 1
+        fi
+
+        rm -f "$DESKTOP_FILE" "$ICONS_DIR/${SLUG}.png"
+        update-desktop-database "$APPS_DIR" 2>/dev/null
+        echo "✓ Usunięto: $NAME"
+        ;;
+
+    list)
+        echo "Zainstalowane web apps:"
+        ls "$APPS_DIR"/webapp-*.desktop 2>/dev/null \
+            | xargs -I{} grep '^Name=' {} \
+            | sed 's/Name=/  → /' \
+            || echo "  (brak)"
+        ;;
+
+    icons)
+        QUERY="${1:-}"
+        echo "Dashboard Icons CDN:"
+        echo "  https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{nazwa}.png"
+        echo ""
+        if [ -n "$QUERY" ]; then
+            SLUG=$(slugify "$QUERY")
+            echo "Możliwy URL dla \"$QUERY\":"
+            echo "  https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/${SLUG}.png"
+        fi
+        echo ""
+        echo "Przeglądaj ikony: https://dashboardicons.com"
+        ;;
+
+    *)
+        echo "webapp - menedżer PWA dla Pop!_OS"
+        echo ""
+        echo "Komendy:"
+        echo "  webapp add \"Nazwa\" \"https://url.com\" [\"https://icon.png\"]"
+        echo "  webapp remove \"Nazwa\""
+        echo "  webapp list"
+        echo "  webapp icons [nazwa]   # podpowiedź URL ikony z Dashboard Icons"
+        echo ""
+        echo "Ikony: https://dashboardicons.com"
+        ;;
+esac
