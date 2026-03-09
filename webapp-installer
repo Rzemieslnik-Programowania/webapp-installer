@@ -1,0 +1,571 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# webapp-installer — cross-platform web app (PWA) manager
+# Usage:
+#   webapp-installer add "Name" "https://url.com" ["https://icon-url.com/icon.png"]
+#   webapp-installer remove "Name"
+#   webapp-installer list
+#   webapp-installer icons [name]
+#
+# High-quality icons: https://dashboardicons.com
+# CDN: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{name}.png
+
+# Environment hardening
+unset IFS CDPATH LD_PRELOAD
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# Exit codes
+readonly EX_OK=0
+readonly EX_USAGE=1
+readonly EX_DEPENDENCY=2
+
+# Max allowed length for app name
+readonly MAX_NAME_LENGTH=64
+
+# Error output and exit
+die() {
+    local message="$1"
+    local code="${2:-$EX_USAGE}"
+    echo "✗ $message" >&2
+    exit "$code"
+}
+
+# Platform-specific directories (set once in main)
+APPS_DIR=""
+ICONS_DIR=""
+
+slugify() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-'
+}
+
+# Validate app name: reject empty, too long, or names containing / or newlines
+validate_name() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        die "App name cannot be empty"
+    fi
+    if [ "${#name}" -gt "$MAX_NAME_LENGTH" ]; then
+        die "App name too long (max $MAX_NAME_LENGTH characters): \"$name\""
+    fi
+    if [[ "$name" == *"/"* ]] || [[ "$name" == *$'\n'* ]] || [[ "$name" == *$'\r'* ]]; then
+        die "App name contains invalid characters (/, newline): \"$name\""
+    fi
+}
+
+# Validate URL: must start with https://
+validate_url() {
+    local url="$1"
+    if [[ ! "$url" =~ ^https:// ]]; then
+        die "URL must start with https:// — got: \"$url\""
+    fi
+}
+
+# Detect the operating system
+detect_os() {
+    local os_name
+    os_name="$(uname -s)"
+    case "$os_name" in
+        Darwin) echo "macos" ;;
+        Linux)  echo "linux" ;;
+        *)      die "Unsupported OS: $os_name. Only macOS and Linux are supported." "$EX_DEPENDENCY" ;;
+    esac
+}
+
+# Detect desktop environment on Linux
+detect_desktop_env() {
+    local xdg_desktop="${XDG_CURRENT_DESKTOP:-}"
+    local session="${DESKTOP_SESSION:-}"
+
+    if [[ "$xdg_desktop" == *"GNOME"* ]] || [[ "$session" == "gnome" ]]; then
+        echo "gnome"
+    elif [[ "$xdg_desktop" == *"KDE"* ]] || [[ "$xdg_desktop" == *"Plasma"* ]] || [[ "$session" == "kde-plasma" ]]; then
+        echo "kde"
+    elif [[ "$xdg_desktop" == *"XFCE"* ]] || [[ "$session" == "xfce" ]]; then
+        echo "xfce"
+    elif [[ "$xdg_desktop" == *"sway"* ]] || [[ "$session" == "sway" ]]; then
+        echo "sway"
+    else
+        echo "unknown"
+    fi
+}
+
+# Detect package manager on Linux
+detect_package_manager() {
+    if command -v apt &>/dev/null; then
+        echo "apt"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v pacman &>/dev/null; then
+        echo "pacman"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
+    else
+        echo "unknown"
+    fi
+}
+
+# Print Chromium installation hints for the current platform/distro
+chromium_install_hint() {
+    local os="$1"
+    local pm="$2"
+
+    case "$pm" in
+        apt) echo "   sudo apt install chromium-browser" ;;
+        dnf) echo "   sudo dnf install chromium" ;;
+        pacman) echo "   sudo pacman -S chromium" ;;
+        zypper) echo "   sudo zypper install chromium" ;;
+        *) echo "   Install Chromium from your distribution's package manager" ;;
+    esac
+
+    if [ "$os" = "macos" ]; then
+        echo "   brew install --cask chromium"
+        echo "   or download from: https://www.chromium.org/getting-involved/download-chromium"
+    fi
+}
+
+# Detect Chromium installation (cross-platform)
+detect_chromium() {
+    local os
+    os=$(detect_os)
+
+    case "$os" in
+        linux)
+            # Linux: native > snap > flatpak
+            if command -v chromium &>/dev/null; then
+                echo "chromium"
+            elif command -v chromium-browser &>/dev/null; then
+                echo "chromium-browser"
+            elif [ -x "/snap/bin/chromium" ]; then
+                echo "/snap/bin/chromium"
+            elif flatpak list 2>/dev/null | grep -q "org.chromium.Chromium"; then
+                echo "flatpak run org.chromium.Chromium"
+            else
+                echo ""
+            fi
+            ;;
+        macos)
+            # macOS: native app > homebrew
+            if [ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]; then
+                echo "/Applications/Chromium.app/Contents/MacOS/Chromium"
+            elif command -v brew &>/dev/null && [ -x "$(brew --prefix 2>/dev/null)/bin/chromium" ]; then
+                echo "$(brew --prefix)/bin/chromium"
+            else
+                echo ""
+            fi
+            ;;
+    esac
+}
+
+# Refresh desktop database (Linux)
+refresh_desktop_db() {
+    local apps_dir="$1"
+
+    # Standard freedesktop.org tool (works on GNOME, KDE, XFCE)
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database "$apps_dir" 2>/dev/null || true
+    fi
+
+    # KDE-specific database (try both KDE 6 and KDE 5)
+    if command -v kbuildsycoca6 &>/dev/null; then
+        kbuildsycoca6 2>/dev/null || true
+    elif command -v kbuildsycoca5 &>/dev/null; then
+        kbuildsycoca5 2>/dev/null || true
+    fi
+}
+
+# Escape a string for use in sed replacement (escape &, /, and \)
+sed_escape() {
+    printf '%s' "$1" | sed 's/[&/\]/\\&/g'
+}
+
+# Try to fetch an icon from URL; returns 0 on success
+fetch_icon() {
+    local url="$1"
+    local dest="$2"
+
+    if [ -z "$url" ]; then
+        return 1
+    fi
+
+    echo "  ↓ Downloading icon from: $url"
+    local http_code
+    http_code=$(curl -sL --proto-redir '=https' --max-time 10 -o "$dest" -w "%{http_code}" "$url")
+
+    if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ] && [ -s "$dest" ]; then
+        return 0
+    else
+        rm -f "$dest"
+        return 1
+    fi
+}
+
+# Create a macOS .app bundle
+create_macos_app() {
+    local name="$1"
+    local slug="$2"
+    local url="$3"
+    local chromium_cmd="$4"
+    local icon_path="$5"
+
+    local app_dir="${HOME}/Applications/webapp-${slug}.app"
+    local contents_dir="${app_dir}/Contents"
+    local macos_dir="${contents_dir}/MacOS"
+    local resources_dir="${contents_dir}/Resources"
+
+    # Create bundle directory structure
+    mkdir -p "$macos_dir" "$resources_dir"
+
+    # Escape values for sed replacement
+    local escaped_name
+    escaped_name=$(sed_escape "$name")
+    local escaped_slug
+    escaped_slug=$(sed_escape "$slug")
+
+    # Create Info.plist with placeholders then replace safely
+    cat > "${contents_dir}/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>webapp-SLUG</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.webapp-installer.SLUG</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>NAME</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+    # Replace placeholders (this function only runs on macOS, so BSD sed is correct)
+    sed -i '' "s/NAME/${escaped_name}/g" "${contents_dir}/Info.plist"
+    sed -i '' "s/SLUG/${escaped_slug}/g" "${contents_dir}/Info.plist"
+
+    # Create launcher script with properly escaped values
+    local escaped_chromium_cmd
+    escaped_chromium_cmd=$(printf '%q' "$chromium_cmd")
+    local escaped_url
+    escaped_url=$(printf '%q' "$url")
+
+    cat > "${macos_dir}/webapp-${slug}" <<LAUNCHER
+#!/usr/bin/env bash
+exec ${escaped_chromium_cmd} --app=${escaped_url}
+LAUNCHER
+    chmod +x "${macos_dir}/webapp-${slug}"
+
+    # Convert icon if provided and sips is available
+    if [ -n "$icon_path" ] && [ -f "$icon_path" ] && command -v sips &>/dev/null; then
+        sips -s format icns "$icon_path" --out "${resources_dir}/icon.icns" 2>/dev/null || true
+    fi
+
+    # Index with Spotlight
+    touch "$app_dir"
+
+    echo "✓ Created macOS app: $name"
+}
+
+# Linux: Add web app (create .desktop file)
+linux_add() {
+    local name="$1"
+    local slug="$2"
+    local url="$3"
+    local chromium_cmd="$4"
+    local icon="$5"
+
+    local desktop_file="$APPS_DIR/webapp-${slug}.desktop"
+
+    cat > "$desktop_file" <<DESKTOP
+[Desktop Entry]
+Version=1.0
+Name=${name}
+Comment=${name}
+Exec=${chromium_cmd} --app="${url}"
+Icon=${icon}
+Type=Application
+Categories=Network;WebApplication;
+StartupWMClass=webapp-${slug}
+StartupNotify=true
+DESKTOP
+
+    refresh_desktop_db "$APPS_DIR"
+    echo "✓ Added: $name → $url"
+}
+
+# Linux: Remove web app
+linux_remove() {
+    local slug="$1"
+    local desktop_file="$APPS_DIR/webapp-${slug}.desktop"
+
+    rm -f "$desktop_file" "$ICONS_DIR/${slug}.png"
+    refresh_desktop_db "$APPS_DIR"
+}
+
+# Linux: List installed web apps
+linux_list() {
+    echo "Installed web apps:"
+    local found=0
+    for desktop_file in "$APPS_DIR"/webapp-*.desktop; do
+        [ -f "$desktop_file" ] || continue
+        local name
+        name=$(grep '^Name=' "$desktop_file" 2>/dev/null | head -1 | sed 's/Name=//')
+        if [ -n "$name" ]; then
+            echo "  → $name"
+            found=1
+        fi
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "  (none)"
+    fi
+}
+
+# macOS: List installed .app bundles
+macos_list() {
+    echo "Installed web apps:"
+    local found=0
+    for app in "${HOME}/Applications/webapp-"*.app; do
+        [ -d "$app" ] || continue
+        local name
+        name=$(grep "CFBundleName" "${app}/Contents/Info.plist" 2>/dev/null | sed 's/.*<string>//;s/<\/string>.*//' | tail -1)
+        if [ -n "$name" ]; then
+            echo "  → $name"
+            found=1
+        fi
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "  (none)"
+    fi
+}
+
+# Upgrade the script to the latest version from GitHub
+upgrade_self() {
+    local repo_url="https://raw.githubusercontent.com/Rzemieslnik-Programowania/webapp-installer/main/webapp-installer"
+    local tmpfile
+    umask 077
+    tmpfile=$(mktemp)
+
+    # Scoped cleanup for this function only
+    local _old_trap
+    _old_trap=$(trap -p EXIT)
+    trap 'rm -f "$tmpfile"' EXIT
+
+    echo "Downloading latest version..."
+    if ! curl -sSL --proto '=https' --proto-redir '=https' -f "$repo_url" -o "$tmpfile"; then
+        die "Failed to download update" "$EX_DEPENDENCY"
+    fi
+
+    if [ ! -s "$tmpfile" ]; then
+        die "Downloaded file is empty" "$EX_DEPENDENCY"
+    fi
+
+    if ! head -1 "$tmpfile" | grep -q "#!/"; then
+        die "Downloaded file does not appear to be a script" "$EX_DEPENDENCY"
+    fi
+
+    # Portable way to get the script's absolute path (realpath not available on stock macOS)
+    local self
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    if ! mv "$tmpfile" "$self"; then
+        die "Failed to install update" "$EX_DEPENDENCY"
+    fi
+
+    chmod +x "$self"
+    echo "✓ webapp-installer upgraded to latest version"
+}
+
+main() {
+    local cmd="${1:-}"
+    if [ -z "$cmd" ]; then
+        cmd="help"
+    fi
+    shift || true
+
+    local os
+    os=$(detect_os)
+
+    # Initialize platform-specific directories once
+    case "$os" in
+        linux)
+            APPS_DIR="$HOME/.local/share/applications"
+            ICONS_DIR="$HOME/.local/share/applications/icons"
+            ;;
+        macos)
+            APPS_DIR="${HOME}/Applications"
+            ICONS_DIR=""
+            ;;
+    esac
+
+    case "$cmd" in
+        add)
+            local NAME="${1:-}"
+            local URL="${2:-}"
+            local ICON_URL="${3:-}"
+
+            if [ -z "$NAME" ] || [ -z "$URL" ]; then
+                die "Usage: webapp-installer add \"Name\" \"https://url.com\" [\"https://icon-url.png\"]"
+            fi
+
+            validate_name "$NAME"
+            validate_url "$URL"
+
+            local SLUG
+            SLUG=$(slugify "$NAME")
+
+            # Detect Chromium
+            local CHROMIUM_CMD
+            CHROMIUM_CMD=$(detect_chromium)
+            if [ -z "$CHROMIUM_CMD" ]; then
+                local pm
+                pm=$(detect_package_manager)
+                echo "✗ Chromium not found. Install with:" >&2
+                chromium_install_hint "$os" "$pm" >&2
+                exit "$EX_DEPENDENCY"
+            fi
+            echo "  ✓ Chromium: $CHROMIUM_CMD"
+
+            # Fetch icon
+            local ICON_DEST
+            local ICON="web-browser"  # fallback
+
+            if [ "$os" = "linux" ]; then
+                mkdir -p "$APPS_DIR" "$ICONS_DIR"
+                ICON_DEST="$ICONS_DIR/${SLUG}.png"
+            else
+                mkdir -p "$APPS_DIR"
+                ICON_DEST="${HOME}/.cache/webapp-installer-${SLUG}.png"
+            fi
+
+            if [ -n "$ICON_URL" ]; then
+                if fetch_icon "$ICON_URL" "$ICON_DEST"; then
+                    ICON="$ICON_DEST"
+                    echo "  ✓ Icon downloaded from provided URL"
+                else
+                    echo "  ✗ Could not download icon from URL, trying favicon..."
+                fi
+            fi
+
+            # Fallback: favicon
+            if [ "$ICON" = "web-browser" ]; then
+                local DOMAIN
+                DOMAIN=$(echo "$URL" | sed 's|https\?://||' | cut -d'/' -f1)
+                local FAVICON_URL="https://www.google.com/s2/favicons?domain=${DOMAIN}&sz=128"
+                if fetch_icon "$FAVICON_URL" "$ICON_DEST"; then
+                    ICON="$ICON_DEST"
+                    echo "  ✓ Icon downloaded from favicon"
+                fi
+            fi
+
+            # Platform-specific add
+            case "$os" in
+                linux)
+                    linux_add "$NAME" "$SLUG" "$URL" "$CHROMIUM_CMD" "$ICON"
+                    ;;
+                macos)
+                    create_macos_app "$NAME" "$SLUG" "$URL" "$CHROMIUM_CMD" "$ICON_DEST"
+                    ;;
+            esac
+            ;;
+
+        remove)
+            local NAME="${1:-}"
+
+            if [ -z "$NAME" ]; then
+                die "Usage: webapp-installer remove \"Name\""
+            fi
+
+            local SLUG
+            SLUG=$(slugify "$NAME")
+
+            case "$os" in
+                linux)
+                    local DESKTOP_FILE="$APPS_DIR/webapp-${SLUG}.desktop"
+                    if [ ! -f "$DESKTOP_FILE" ]; then
+                        die "Web app not found: \"$NAME\""
+                    fi
+                    linux_remove "$SLUG"
+                    echo "✓ Removed: $NAME"
+                    ;;
+                macos)
+                    local app_dir="${HOME}/Applications/webapp-${SLUG}.app"
+                    if [ ! -d "$app_dir" ]; then
+                        die "Web app not found: \"$NAME\""
+                    fi
+                    # Verify path is within expected directory before removing
+                    case "$app_dir" in
+                        "${HOME}/Applications/webapp-"*)
+                            rm -rf "$app_dir"
+                            ;;
+                        *)
+                            die "Unexpected app path: $app_dir"
+                            ;;
+                    esac
+                    echo "✓ Removed: $NAME"
+                    ;;
+            esac
+            ;;
+
+        list)
+            case "$os" in
+                linux)
+                    linux_list
+                    ;;
+                macos)
+                    macos_list
+                    ;;
+            esac
+            ;;
+
+        upgrade)
+            upgrade_self
+            ;;
+
+        icons)
+            local QUERY="${1:-}"
+            echo "Dashboard Icons CDN:"
+            echo "  https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{name}.png"
+            echo ""
+            if [ -n "$QUERY" ]; then
+                local SLUG
+                SLUG=$(slugify "$QUERY")
+                echo "Possible URL for \"$QUERY\":"
+                echo "  https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/${SLUG}.png"
+            fi
+            echo ""
+            echo "Browse icons: https://dashboardicons.com"
+            ;;
+
+        *)
+            echo "webapp-installer — cross-platform web app (PWA) manager"
+            echo ""
+            echo "Commands:"
+            echo "  webapp-installer add \"Name\" \"https://url.com\" [\"https://icon.png\"]"
+            echo "  webapp-installer remove \"Name\""
+            echo "  webapp-installer list"
+            echo "  webapp-installer icons [name]"
+            echo "  webapp-installer upgrade"
+            echo ""
+            echo "Icons: https://dashboardicons.com"
+            ;;
+    esac
+}
+
+# Run main if this script is executed (not sourced)
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+    main "$@"
+fi
