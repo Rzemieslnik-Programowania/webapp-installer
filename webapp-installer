@@ -53,11 +53,14 @@ validate_name() {
     fi
 }
 
-# Validate URL: must start with https://
+# Validate URL: must start with http:// or https://
 validate_url() {
     local url="$1"
-    if [[ ! "$url" =~ ^https:// ]]; then
-        die "URL must start with https:// — got: \"$url\""
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        die "URL must start with http:// or https:// — got: \"$url\""
+    fi
+    if [[ "$url" =~ ^http:// ]]; then
+        echo "⚠ Warning: using insecure http:// — consider https:// instead" >&2
     fi
 }
 
@@ -418,7 +421,7 @@ main() {
             local ICON_URL="${3:-}"
 
             if [ -z "$NAME" ] || [ -z "$URL" ]; then
-                die "Usage: webapp-installer add \"Name\" \"https://url.com\" [\"https://icon-url.png\"]"
+                die "Usage: webapp-installer add \"Name\" \"<http|https>://url.com\" [\"https://icon-url.png\"]"
             fi
 
             validate_name "$NAME"
@@ -554,7 +557,7 @@ main() {
             echo "webapp-installer — cross-platform web app (PWA) manager"
             echo ""
             echo "Commands:"
-            echo "  webapp-installer add \"Name\" \"https://url.com\" [\"https://icon.png\"]"
+            echo "  webapp-installer add \"Name\" \"<http|https>://url.com\" [\"https://icon.png\"]"
             echo "  webapp-installer remove \"Name\""
             echo "  webapp-installer list"
             echo "  webapp-installer icons [name]"
