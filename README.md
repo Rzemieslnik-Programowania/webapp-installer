@@ -56,9 +56,17 @@ chmod +x ~/bin/webapp-installer
 Ensure `~/bin` is in your PATH:
 
 ```bash
-# Add to ~/.bashrc or ~/.zshrc (macOS)
+# Bash
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
+```
+
+or
+
+```bash
+# Zsh
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ## Usage
