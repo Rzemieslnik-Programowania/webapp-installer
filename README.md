@@ -13,13 +13,15 @@ Inspired by the approach used in [Omarchy](https://omarchy.org).
 
 ### Browser
 
-A Chromium-based browser is required. The tool auto-detects the first available browser in this order:
+A Chromium-based browser is required. By default, the tool auto-detects the first available browser in this order:
 
 1. **Chromium**
 2. **Google Chrome**
 3. **Brave**
 4. **Microsoft Edge**
 5. **Vivaldi**
+
+You can override this with the `--browser` option (see [Usage](#add-a-web-app)).
 
 If none are found, install one:
 
@@ -90,6 +92,17 @@ The icon is fetched automatically from the site's favicon. You can provide a cus
 ```bash
 webapp-installer add "Name" "https://url.com" "https://icon-url.com/icon.png"
 ```
+
+### Choose a specific browser
+
+Use `--browser <name>` to select which browser to use instead of auto-detection:
+
+```bash
+webapp-installer add --browser brave "Notion" "https://notion.so"
+webapp-installer add --browser chrome "Linear" "https://linear.app"
+```
+
+Valid browser names: `chromium`, `chrome`, `brave`, `edge`, `vivaldi` (case-insensitive).
 
 ### High-quality icons
 

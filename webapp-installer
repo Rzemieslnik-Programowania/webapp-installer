@@ -3,10 +3,12 @@ set -euo pipefail
 
 # webapp-installer — cross-platform web app (PWA) manager
 # Usage:
-#   webapp-installer add "Name" "https://url.com" ["https://icon-url.com/icon.png"]
+#   webapp-installer add [--browser <name>] "Name" "https://url.com" ["https://icon-url.com/icon.png"]
 #   webapp-installer remove "Name"
 #   webapp-installer list
 #   webapp-installer icons [name]
+#
+# Browsers: chromium, chrome, brave, edge, vivaldi
 #
 # High-quality icons: https://dashboardicons.com
 # CDN: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/{name}.png
@@ -131,9 +133,44 @@ browser_install_hint() {
     fi
 }
 
-# Browser detection globals (set by detect_browser)
+# Browser detection globals (set by detect_browser / resolve_browser)
 BROWSER_CMD=""
 BROWSER_NAME=""
+
+# Valid browser names for --browser option (lowercase)
+readonly VALID_BROWSERS="chromium chrome brave edge vivaldi"
+
+# Print error when a user-selected browser is not installed, then exit
+browser_not_found() {
+    local requested="$1"
+    local os="$2"
+    local pm
+    pm=$(detect_package_manager)
+    echo "✗ Browser not found: $requested" >&2
+    echo "  Install it first:" >&2
+    browser_install_hint "$os" "$pm" >&2
+    exit "$EX_DEPENDENCY"
+}
+
+# Validate and resolve a user-provided browser name
+# Sets BROWSER_CMD and BROWSER_NAME on success, dies on failure
+resolve_browser() {
+    local requested="$1"
+    local os="$2"
+
+    # Normalize to lowercase
+    local name
+    name="$(echo "$requested" | tr '[:upper:]' '[:lower:]')"
+
+    case "$name" in
+        chromium) _detect_chromium || browser_not_found "$requested" "$os" ;;
+        chrome)   _detect_chrome   || browser_not_found "$requested" "$os" ;;
+        brave)    _detect_brave    || browser_not_found "$requested" "$os" ;;
+        edge)     _detect_edge     || browser_not_found "$requested" "$os" ;;
+        vivaldi)  _detect_vivaldi  || browser_not_found "$requested" "$os" ;;
+        *)        die "Unknown browser: \"$requested\". Valid options: chromium, chrome, brave, edge, vivaldi" ;;
+    esac
+}
 
 # System-level Applications directory (overridable for testing)
 : "${MACOS_SYSTEM_APPS:=/Applications}"
@@ -541,12 +578,37 @@ main() {
 
     case "$cmd" in
         add)
+            local BROWSER_OPT=""
+
+            # Parse options before positional arguments
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --browser)
+                        if [[ $# -lt 2 ]] || [[ "$2" == -* ]]; then
+                            die "Usage: webapp-installer add [--browser <name>] \"Name\" \"URL\" [\"icon-url\"]\n  Valid browsers: chromium, chrome, brave, edge, vivaldi"
+                        fi
+                        BROWSER_OPT="$2"
+                        shift 2
+                        ;;
+                    --)
+                        shift
+                        break
+                        ;;
+                    -*)
+                        die "Unknown option: $1\n  Usage: webapp-installer add [--browser <name>] \"Name\" \"URL\" [\"icon-url\"]"
+                        ;;
+                    *)
+                        break
+                        ;;
+                esac
+            done
+
             local NAME="${1:-}"
             local URL="${2:-}"
             local ICON_URL="${3:-}"
 
             if [ -z "$NAME" ] || [ -z "$URL" ]; then
-                die "Usage: webapp-installer add \"Name\" \"<http|https>://url.com\" [\"https://icon-url.png\"]"
+                die "Usage: webapp-installer add [--browser <name>] \"Name\" \"<http|https>://url.com\" [\"https://icon-url.png\"]"
             fi
 
             validate_name "$NAME"
@@ -555,19 +617,25 @@ main() {
             local SLUG
             SLUG=$(slugify "$NAME")
 
-            # Detect a compatible browser
-            if ! detect_browser; then
-                local pm
-                pm=$(detect_package_manager)
-                echo "✗ No compatible browser found. Install one of:" >&2
-                browser_install_hint "$os" "$pm" >&2
-                exit "$EX_DEPENDENCY"
-            fi
-            local CHROMIUM_CMD="$BROWSER_CMD"
-            if [ "$BROWSER_NAME" = "Chromium" ]; then
-                echo "  ✓ Browser: Chromium"
+            # Detect or resolve browser
+            if [[ -n "$BROWSER_OPT" ]]; then
+                resolve_browser "$BROWSER_OPT" "$os"
+                local CHROMIUM_CMD="$BROWSER_CMD"
+                echo "  ✓ Browser: $BROWSER_NAME (user-selected)"
             else
-                echo "  ✓ Browser: $BROWSER_NAME (Chromium not found)"
+                if ! detect_browser; then
+                    local pm
+                    pm=$(detect_package_manager)
+                    echo "✗ No compatible browser found. Install one of:" >&2
+                    browser_install_hint "$os" "$pm" >&2
+                    exit "$EX_DEPENDENCY"
+                fi
+                local CHROMIUM_CMD="$BROWSER_CMD"
+                if [ "$BROWSER_NAME" = "Chromium" ]; then
+                    echo "  ✓ Browser: Chromium"
+                else
+                    echo "  ✓ Browser: $BROWSER_NAME (Chromium not found)"
+                fi
             fi
 
             # Fetch icon
@@ -685,11 +753,14 @@ main() {
             echo "webapp-installer — cross-platform web app (PWA) manager"
             echo ""
             echo "Commands:"
-            echo "  webapp-installer add \"Name\" \"<http|https>://url.com\" [\"https://icon.png\"]"
+            echo "  webapp-installer add [--browser <name>] \"Name\" \"URL\" [\"icon.png\"]"
             echo "  webapp-installer remove \"Name\""
             echo "  webapp-installer list"
             echo "  webapp-installer icons [name]"
             echo "  webapp-installer upgrade"
+            echo ""
+            echo "Browsers: chromium, chrome, brave, edge, vivaldi"
+            echo "  If --browser is omitted, the first available browser is used."
             echo ""
             echo "Icons: https://dashboardicons.com"
             ;;
