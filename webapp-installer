@@ -108,56 +108,181 @@ detect_package_manager() {
     fi
 }
 
-# Print Chromium installation hints for the current platform/distro
-chromium_install_hint() {
+# Print browser installation hints for the current platform/distro
+browser_install_hint() {
     local os="$1"
     local pm="$2"
 
+    echo "   Supported browsers (in priority order):"
+    echo "   Chromium, Google Chrome, Brave, Microsoft Edge, Vivaldi"
+    echo ""
     case "$pm" in
-        apt) echo "   sudo apt install chromium-browser" ;;
-        dnf) echo "   sudo dnf install chromium" ;;
+        apt)    echo "   sudo apt install chromium-browser"
+                echo "   sudo apt install google-chrome-stable" ;;
+        dnf)    echo "   sudo dnf install chromium" ;;
         pacman) echo "   sudo pacman -S chromium" ;;
         zypper) echo "   sudo zypper install chromium" ;;
-        *) echo "   Install Chromium from your distribution's package manager" ;;
+        *)      echo "   Install a supported browser from your distribution's package manager" ;;
     esac
-
     if [ "$os" = "macos" ]; then
         echo "   brew install --cask chromium"
-        echo "   or download from: https://www.chromium.org/getting-involved/download-chromium"
+        echo "   brew install --cask google-chrome"
+        echo "   or download from: https://www.google.com/chrome/"
     fi
 }
 
-# Detect Chromium installation (cross-platform)
-detect_chromium() {
+# Browser detection globals (set by detect_browser)
+BROWSER_CMD=""
+BROWSER_NAME=""
+
+# System-level Applications directory (overridable for testing)
+: "${MACOS_SYSTEM_APPS:=/Applications}"
+
+# Per-browser detection helpers — each sets BROWSER_CMD and BROWSER_NAME on success
+_detect_chromium() {
     local os
     os=$(detect_os)
-
     case "$os" in
         linux)
-            # Linux: native > snap > flatpak
-            if command -v chromium &>/dev/null; then
-                echo "chromium"
-            elif command -v chromium-browser &>/dev/null; then
-                echo "chromium-browser"
-            elif [ -x "/snap/bin/chromium" ]; then
-                echo "/snap/bin/chromium"
-            elif flatpak list 2>/dev/null | grep -q "org.chromium.Chromium"; then
-                echo "flatpak run org.chromium.Chromium"
-            else
-                echo ""
+            local cmd
+            for cmd in chromium chromium-browser; do
+                if command -v "$cmd" &>/dev/null; then
+                    BROWSER_CMD="$cmd"; BROWSER_NAME="Chromium"; return 0
+                fi
+            done
+            if [ -x "/snap/bin/chromium" ]; then
+                BROWSER_CMD="/snap/bin/chromium"; BROWSER_NAME="Chromium"; return 0
+            fi
+            if flatpak list 2>/dev/null | grep -q "org.chromium.Chromium"; then
+                BROWSER_CMD="flatpak run org.chromium.Chromium"; BROWSER_NAME="Chromium"; return 0
             fi
             ;;
         macos)
-            # macOS: native app > homebrew
-            if [ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]; then
-                echo "/Applications/Chromium.app/Contents/MacOS/Chromium"
-            elif command -v brew &>/dev/null && [ -x "$(brew --prefix 2>/dev/null)/bin/chromium" ]; then
-                echo "$(brew --prefix)/bin/chromium"
-            else
-                echo ""
+            local p
+            for p in "${MACOS_SYSTEM_APPS}/Chromium.app/Contents/MacOS/Chromium" \
+                     "${HOME}/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+                if [ -x "$p" ]; then
+                    BROWSER_CMD="$p"; BROWSER_NAME="Chromium"; return 0
+                fi
+            done
+            if command -v brew &>/dev/null && [ -x "$(brew --prefix 2>/dev/null)/bin/chromium" ]; then
+                BROWSER_CMD="$(brew --prefix)/bin/chromium"; BROWSER_NAME="Chromium"; return 0
             fi
             ;;
     esac
+    return 1
+}
+
+_detect_chrome() {
+    local os
+    os=$(detect_os)
+    case "$os" in
+        linux)
+            local cmd
+            for cmd in google-chrome google-chrome-stable google-chrome-beta; do
+                if command -v "$cmd" &>/dev/null; then
+                    BROWSER_CMD="$cmd"; BROWSER_NAME="Google Chrome"; return 0
+                fi
+            done
+            ;;
+        macos)
+            local p
+            for p in "${MACOS_SYSTEM_APPS}/Google Chrome.app/Contents/MacOS/Google Chrome" \
+                     "${HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; do
+                if [ -x "$p" ]; then
+                    BROWSER_CMD="$p"; BROWSER_NAME="Google Chrome"; return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+_detect_brave() {
+    local os
+    os=$(detect_os)
+    case "$os" in
+        linux)
+            local cmd
+            for cmd in brave-browser brave-browser-stable; do
+                if command -v "$cmd" &>/dev/null; then
+                    BROWSER_CMD="$cmd"; BROWSER_NAME="Brave"; return 0
+                fi
+            done
+            ;;
+        macos)
+            local p
+            for p in "${MACOS_SYSTEM_APPS}/Brave Browser.app/Contents/MacOS/Brave Browser" \
+                     "${HOME}/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"; do
+                if [ -x "$p" ]; then
+                    BROWSER_CMD="$p"; BROWSER_NAME="Brave"; return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+_detect_edge() {
+    local os
+    os=$(detect_os)
+    case "$os" in
+        linux)
+            local cmd
+            for cmd in microsoft-edge microsoft-edge-stable; do
+                if command -v "$cmd" &>/dev/null; then
+                    BROWSER_CMD="$cmd"; BROWSER_NAME="Microsoft Edge"; return 0
+                fi
+            done
+            ;;
+        macos)
+            local p
+            for p in "${MACOS_SYSTEM_APPS}/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+                     "${HOME}/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"; do
+                if [ -x "$p" ]; then
+                    BROWSER_CMD="$p"; BROWSER_NAME="Microsoft Edge"; return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+_detect_vivaldi() {
+    local os
+    os=$(detect_os)
+    case "$os" in
+        linux)
+            local cmd
+            for cmd in vivaldi vivaldi-stable; do
+                if command -v "$cmd" &>/dev/null; then
+                    BROWSER_CMD="$cmd"; BROWSER_NAME="Vivaldi"; return 0
+                fi
+            done
+            ;;
+        macos)
+            local p
+            for p in "${MACOS_SYSTEM_APPS}/Vivaldi.app/Contents/MacOS/Vivaldi" \
+                     "${HOME}/Applications/Vivaldi.app/Contents/MacOS/Vivaldi"; do
+                if [ -x "$p" ]; then
+                    BROWSER_CMD="$p"; BROWSER_NAME="Vivaldi"; return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+# Detect a compatible browser (priority: Chromium > Chrome > Brave > Edge > Vivaldi)
+detect_browser() {
+    BROWSER_CMD=""
+    BROWSER_NAME=""
+    _detect_chromium && return 0
+    _detect_chrome && return 0
+    _detect_brave && return 0
+    _detect_edge && return 0
+    _detect_vivaldi && return 0
+    return 1
 }
 
 # Refresh desktop database (Linux)
@@ -430,17 +555,20 @@ main() {
             local SLUG
             SLUG=$(slugify "$NAME")
 
-            # Detect Chromium
-            local CHROMIUM_CMD
-            CHROMIUM_CMD=$(detect_chromium)
-            if [ -z "$CHROMIUM_CMD" ]; then
+            # Detect a compatible browser
+            if ! detect_browser; then
                 local pm
                 pm=$(detect_package_manager)
-                echo "✗ Chromium not found. Install with:" >&2
-                chromium_install_hint "$os" "$pm" >&2
+                echo "✗ No compatible browser found. Install one of:" >&2
+                browser_install_hint "$os" "$pm" >&2
                 exit "$EX_DEPENDENCY"
             fi
-            echo "  ✓ Chromium: $CHROMIUM_CMD"
+            local CHROMIUM_CMD="$BROWSER_CMD"
+            if [ "$BROWSER_NAME" = "Chromium" ]; then
+                echo "  ✓ Browser: Chromium"
+            else
+                echo "  ✓ Browser: $BROWSER_NAME (Chromium not found)"
+            fi
 
             # Fetch icon
             local ICON_DEST

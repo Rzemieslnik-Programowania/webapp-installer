@@ -1,6 +1,8 @@
 # webapp-installer
 
-A cross-platform web app (PWA) manager for macOS and Linux distributions. Creates native application entries that launch websites in Chromium's `--app` mode — no address bar, just like a native application.
+A cross-platform web app (PWA) manager for macOS and Linux distributions. Creates native application entries that launch websites in a Chromium-based browser's `--app` mode — no address bar, just like a native application.
+
+Supports multiple browsers in priority order: **Chromium > Google Chrome > Brave > Microsoft Edge > Vivaldi**.
 
 **macOS:** Creates `.app` bundles in `~/Applications/`
 **Linux:** Creates `.desktop` entries in `~/.local/share/applications/` (works with GNOME, KDE, XFCE, and other desktop environments)
@@ -9,32 +11,38 @@ Inspired by the approach used in [Omarchy](https://omarchy.org).
 
 ## Requirements
 
-### macOS
-- **Chromium**: Install via Homebrew or direct download
-  ```bash
-  brew install --cask chromium
-  # or download from https://www.chromium.org/getting-involved/download-chromium
-  ```
-- **curl** (usually pre-installed)
+### Browser
 
-### Linux
-- **Chromium**: Install via your distribution's package manager:
-  ```bash
-  # Debian/Ubuntu
-  sudo apt install chromium-browser
+A Chromium-based browser is required. The tool auto-detects the first available browser in this order:
 
-  # Fedora/RHEL
-  sudo dnf install chromium
+1. **Chromium**
+2. **Google Chrome**
+3. **Brave**
+4. **Microsoft Edge**
+5. **Vivaldi**
 
-  # Arch
-  sudo pacman -S chromium
+If none are found, install one:
 
-  # openSUSE
-  sudo zypper install chromium
+```bash
+# macOS (via Homebrew)
+brew install --cask chromium
+brew install --cask google-chrome
 
-  # Or via Flatpak (all distributions)
-  flatpak install flathub org.chromium.Chromium
-  ```
+# Debian/Ubuntu
+sudo apt install chromium-browser
+sudo apt install google-chrome-stable
+
+# Fedora/RHEL
+sudo dnf install chromium
+
+# Arch
+sudo pacman -S chromium
+
+# openSUSE
+sudo zypper install chromium
+```
+
+### Other
 - **curl** (usually pre-installed)
 
 ### Both
@@ -139,7 +147,7 @@ webapp-installer upgrade
 
 ### macOS
 Creates a `.app` bundle in `~/Applications/`:
-- `Contents/MacOS/` — shell script launcher that calls Chromium with `--app=<url>`
+- `Contents/MacOS/` — shell script launcher that calls the detected browser with `--app=<url>`
 - `Contents/Info.plist` — app metadata for Spotlight, Dock, and System Preferences
 - `Contents/Resources/icon.icns` — app icon (if provided and `sips` is available)
 
@@ -158,7 +166,7 @@ Type=Application
 Categories=Network;WebApplication;
 ```
 
-The `--app` flag launches Chromium without the address bar — the window looks and behaves like a native app. The `.desktop` entries appear in your application menu (Activities in GNOME, Applications in KDE, etc.).
+The `--app` flag launches the browser without the address bar — the window looks and behaves like a native app. The `.desktop` entries appear in your application menu (Activities in GNOME, Applications in KDE, etc.).
 
 ## File structure
 
